@@ -11,8 +11,8 @@ import uuid
 # CONFIGURACIÓN DE CONEXIÓN DEFINITIVA
 # Usamos el Pooler de Supabase (Puerto 6543) para máxima compatibilidad con Render
 # ==========================================================
-# URL LIMPIA Y ESTÁNDAR PARA SUPABASE/RENDER
-DB_URL = "postgresql://postgres.oxbbcoyiskgtxliytgax:FdXKl1vTLwTLk5Lz@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require"
+# URL oficial corregida para Supabase Pooler
+DB_URL = "postgresql://postgres:FdXKl1vTLwTLk5Lz@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require"
 
 engine = create_engine(
     DB_URL, 
