@@ -7,7 +7,6 @@ from typing import List, Optional
 import uuid
 
 # Configuración de Base de Datos (Supabase)
-# Reemplaza con tus credenciales si es necesario
 SQLALCHEMY_DATABASE_URL = "postgresql://postgres:FdXKl1vTLwTLk5Lz@db.oxbbcoyiskgtxliytgax.supabase.co:5432/postgres"
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
@@ -18,7 +17,7 @@ Base = declarative_base()
 
 class ContactoDB(Base):
     __tablename__ = "contactos"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String, primary_key=True) # Usamos String para compatibilidad con UUID de Postgres
     nombre = Column(String, nullable=False)
     telefono = Column(String, nullable=False)
     email = Column(String)
@@ -28,7 +27,7 @@ class ContactoDB(Base):
 
 class ImagenDB(Base):
     __tablename__ = "imagenes"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String, primary_key=True)
     url = Column(String, nullable=False)
     entidad_id = Column(String, nullable=False)
     entidad_tipo = Column(String, nullable=False)
@@ -55,7 +54,7 @@ class ContactoRead(BaseModel):
     label: str
     is_favorite: bool
     notes: Optional[str]
-    imagen: Optional[ImagenSchema]
+    imagen: Optional[ImagenSchema] = None
 
     class Config:
         orm_mode = True
@@ -76,12 +75,14 @@ app = FastAPI(title="API de Contactos Profesional")
 def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
     """
     Inserción Transaccional: Se guarda el contacto y su imagen polimórfica.
-    Si algo falla, el rollback automático de la sesión evita datos huérfanos.
     """
     try:
+        # Generar un ID único para el contacto
+        nuevo_id = str(uuid.uuid4())
+        
         # 1. Crear el objeto Contacto
         nuevo_contacto = ContactoDB(
-            id=str(uuid.uuid4()),
+            id=nuevo_id,
             nombre=contacto.nombre,
             telefono=contacto.telefono,
             email=contacto.email,
@@ -90,14 +91,14 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
             notes=contacto.notes
         )
         db.add(nuevo_contacto)
-
+        
         # 2. Si hay imagen, crear el registro polimórfico
         imagen_obj = None
         if contacto.imagen_url:
             nueva_imagen = ImagenDB(
                 id=str(uuid.uuid4()),
                 url=contacto.imagen_url,
-                entidad_id=nuevo_contacto.id,
+                entidad_id=nuevo_id,
                 entidad_tipo="contacto"
             )
             db.add(nueva_imagen)
@@ -109,34 +110,49 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
 
         # Retornar objeto estructurado
         return ContactoRead(
-            **nuevo_contacto.__dict__,
+            id=nuevo_contacto.id,
+            nombre=nuevo_contacto.nombre,
+            telefono=nuevo_contacto.telefono,
+            email=nuevo_contacto.email,
+            label=nuevo_contacto.label,
+            is_favorite=nuevo_contacto.is_favorite,
+            notes=nuevo_contacto.notes,
             imagen=imagen_obj
         )
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"Error transaccional: {str(e)}")
+        print(f"DEBUG ERROR: {str(e)}") # Esto saldrá en los logs de Render
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/contactos", response_model=List[ContactoRead])
 def listar_contactos(db: Session = Depends(get_db)):
     """
-    JOIN Lógico: Obtiene contactos e imágenes polimórficas de forma eficiente.
+    JOIN Lógico: Obtiene contactos e imágenes polimórficas.
     """
-    contactos = db.query(ContactoDB).all()
-    resultado = []
-
-    for c in contactos:
-        # Buscar la imagen correspondiente en la tabla polimórfica
-        img = db.query(ImagenDB).filter(
-            ImagenDB.entidad_id == c.id,
-            ImagenDB.entidad_tipo == "contacto"
-        ).first()
-
-        resultado.append(ContactoRead(
-            **c.__dict__,
-            imagen=ImagenSchema(url=img.url) if img else None
-        ))
-
-    return resultado
+    try:
+        contactos = db.query(ContactoDB).all()
+        resultado = []
+        
+        for c in contactos:
+            img = db.query(ImagenDB).filter(
+                ImagenDB.entidad_id == c.id, 
+                ImagenDB.entidad_tipo == "contacto"
+            ).first()
+            
+            resultado.append(ContactoRead(
+                id=c.id,
+                nombre=c.nombre,
+                telefono=c.telefono,
+                email=c.email,
+                label=c.label,
+                is_favorite=c.is_favorite,
+                notes=c.notes,
+                imagen=ImagenSchema(url=img.url) if img else None
+            ))
+            
+        return resultado
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
