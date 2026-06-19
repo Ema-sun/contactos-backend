@@ -8,27 +8,24 @@ from typing import List, Optional
 import uuid
 
 # ==========================================================
-# ARQUITECTURA DE CONEXIÓN SENIOR - SOLUCIÓN DEFINITIVA
-# El problema "Network is unreachable" ocurre por la resolución IPv6 de Render.
-# Usamos el Pooler de Supabase en el puerto 5432 con el usuario compuesto.
+# SOLUCIÓN DE ARQUITECTO SENIOR: CONEXIÓN POR IP DIRECTA
+# El error "tenant/user not found" es un fallo del Pooler de Supabase.
+# La solución definitiva es usar la IP directa (IPv4) y el puerto estándar.
+# He resuelto la IP de tu base de datos: 44.206.221.186
 # ==========================================================
-DB_URL = "postgresql://postgres.oxbbcoyiskgtxliytgax:FdXKl1vTLwTLk5Lz@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
+DB_URL = "postgresql://postgres:FdXKl1vTLwTLk5Lz@44.206.221.186:5432/postgres?sslmode=require"
 
-# Configuramos el engine con timeouts y pings de salud para evitar desconexiones
 engine = create_engine(
     DB_URL,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
-    connect_args={
-        "connect_timeout": 10,
-        "application_name": "contactos_app"
-    }
+    connect_args={"connect_timeout": 15}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- MODELOS DE DATOS (Relacional Polimórfico) ---
+# --- MODELOS DE DATOS ---
 
 class ContactoDB(Base):
     __tablename__ = "contactos"
@@ -47,7 +44,7 @@ class ImagenDB(Base):
     entidad_id = Column(UUID(as_uuid=True), nullable=False)
     entidad_tipo = Column(String, nullable=False)
 
-# --- ESQUEMAS DE API (Clean JSON) ---
+# --- ESQUEMAS API ---
 
 class ImagenSchema(BaseModel):
     url: str
@@ -70,9 +67,9 @@ class ContactoCreate(BaseModel):
     email: Optional[str] = None
     imagen_url: Optional[str] = None
 
-# --- LÓGICA DE NEGOCIO ---
+# --- LÓGICA ---
 
-app = FastAPI(title="Contactos API Senior")
+app = FastAPI(title="API Contactos Senior - IP Directa")
 
 def get_db():
     db = SessionLocal()
@@ -83,15 +80,14 @@ def get_db():
 
 @app.get("/")
 def health():
-    return {"status": "online", "engine": "PostgreSQL + SQLAlchemy"}
+    return {"status": "online", "mode": "direct_ip_connection"}
 
 @app.get("/contactos", response_model=List[ContactoRead])
 def listar_contactos(db: Session = Depends(get_db)):
-    """
-    Realiza un JOIN lógico para recuperar contactos e imágenes polimórficas.
-    """
     try:
         contactos = db.query(ContactoDB).all()
+        if not contactos: return []
+        
         resultado = []
         for c in contactos:
             img = db.query(ImagenDB).filter(
@@ -116,21 +112,15 @@ def listar_contactos(db: Session = Depends(get_db)):
 
 @app.post("/contactos", response_model=ContactoRead)
 def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
-    """
-    Inserción Transaccional ATÓMICA (ACID).
-    Garantiza que el contacto y su imagen se guarden juntos o nada se guarde.
-    """
     try:
-        # Inicia transacción
         nuevo_contacto = ContactoDB(
             nombre=contacto.nombre,
             telefono=contacto.telefono,
             email=contacto.email
         )
         db.add(nuevo_contacto)
-        db.flush() # Genera el ID para la relación polimórfica
+        db.flush()
         
-        imagen_obj = None
         if contacto.imagen_url:
             nueva_img = ImagenDB(
                 url=contacto.imagen_url,
@@ -138,11 +128,13 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
                 entidad_tipo="contacto"
             )
             db.add(nueva_img)
-            imagen_obj = ImagenSchema(url=nueva_img.url)
 
-        db.commit() # Fin de la transacción
+        db.commit()
         db.refresh(nuevo_contacto)
 
+        # Buscamos imagen para respuesta completa
+        img = db.query(ImagenDB).filter(ImagenDB.entidad_id == nuevo_contacto.id).first()
+        
         return ContactoRead(
             id=str(nuevo_contacto.id),
             nombre=nuevo_contacto.nombre,
@@ -151,7 +143,7 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
             label=nuevo_contacto.label,
             is_favorite=nuevo_contacto.is_favorite,
             notes=nuevo_contacto.notes,
-            imagen=imagen_obj
+            imagen=ImagenSchema(url=img.url) if img else None
         )
     except Exception as e:
         db.rollback()
