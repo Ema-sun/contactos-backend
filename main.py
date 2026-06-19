@@ -1,22 +1,28 @@
 from fastapi import FastAPI, HTTPException, Depends
-from sqlalchemy import create_engine, Column, String, Boolean, Text, ForeignKey
+from sqlalchemy import create_engine, Column, String, Boolean, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from typing import List, Optional
 import uuid
-import os
 
-# --- CONFIGURACIÓN DE CONEXIÓN ROBUSTA ---
-# Usamos el puerto 6543 y el modo transacción que es el estándar de Supabase para nubes como Render
+# --- CONFIGURACIÓN DE CONEXIÓN DE ALTA ESTABILIDAD ---
+# Usamos el modo Transaction Pooler (Puerto 6543) optimizado para Render/Supabase
 SQLALCHEMY_DATABASE_URL = "postgresql://postgres.oxbbcoyiskgtxliytgax:FdXKl1vTLwTLk5Lz@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require&prepare_threshold=0"
 
-# El argumento 'pool_pre_ping' asegura que si la conexión se cae, se reconecte automáticamente
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, 
-    pool_pre_ping=True,
-    pool_recycle=300
+    pool_size=5,           # Reducimos conexiones para evitar saturación
+    max_overflow=10,
+    pool_pre_ping=True,    # Verifica si la conexión está viva
+    pool_recycle=300,      # Reinicia conexiones viejas
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -64,6 +70,7 @@ class ContactoRead(BaseModel):
     class Config:
         from_attributes = True
 
+# --- DEPENDENCIAS ---
 def get_db():
     db = SessionLocal()
     try:
@@ -74,8 +81,8 @@ def get_db():
 app = FastAPI()
 
 @app.get("/")
-def health_check():
-    return {"status": "online", "database": "connected"}
+def health():
+    return {"status": "online"}
 
 @app.post("/contactos", response_model=ContactoRead)
 def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
