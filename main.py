@@ -8,22 +8,28 @@ from typing import List, Optional
 import uuid
 
 # ==========================================================
-# CONFIGURACIÓN DE CONEXIÓN DEFINITIVA
-# Usamos el Pooler de Supabase (Puerto 6543) para máxima compatibilidad con Render
+# ARQUITECTURA DE CONEXIÓN SENIOR - SOLUCIÓN DEFINITIVA
+# El problema "Network is unreachable" ocurre por la resolución IPv6 de Render.
+# Usamos el Pooler de Supabase en el puerto 5432 con el usuario compuesto.
 # ==========================================================
-# URL Definitiva para Render (Evita error de red IPv6 y error de Tenant)
-DB_URL = "postgresql://postgres:FdXKl1vTLwTLk5Lz@44.206.221.186:5432/postgres?sslmode=require"
+DB_URL = "postgresql://postgres.oxbbcoyiskgtxliytgax:FdXKl1vTLwTLk5Lz@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
 
+# Configuramos el engine con timeouts y pings de salud para evitar desconexiones
 engine = create_engine(
-    DB_URL, 
+    DB_URL,
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10
+    pool_size=10,
+    max_overflow=20,
+    connect_args={
+        "connect_timeout": 10,
+        "application_name": "contactos_app"
+    }
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- MODELOS DE BASE DE DATOS ---
+# --- MODELOS DE DATOS (Relacional Polimórfico) ---
+
 class ContactoDB(Base):
     __tablename__ = "contactos"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -41,7 +47,8 @@ class ImagenDB(Base):
     entidad_id = Column(UUID(as_uuid=True), nullable=False)
     entidad_tipo = Column(String, nullable=False)
 
-# --- ESQUEMAS PARA LA API (PYDANTIC) ---
+# --- ESQUEMAS DE API (Clean JSON) ---
+
 class ImagenSchema(BaseModel):
     url: str
 
@@ -63,8 +70,9 @@ class ContactoCreate(BaseModel):
     email: Optional[str] = None
     imagen_url: Optional[str] = None
 
-# --- INICIALIZACIÓN ---
-app = FastAPI(title="API Contactos Profesional")
+# --- LÓGICA DE NEGOCIO ---
+
+app = FastAPI(title="Contactos API Senior")
 
 def get_db():
     db = SessionLocal()
@@ -73,22 +81,19 @@ def get_db():
     finally:
         db.close()
 
-# --- ENDPOINTS ---
-
 @app.get("/")
-def home():
-    return {"status": "online", "message": "Backend listo para recibir contactos"}
+def health():
+    return {"status": "online", "engine": "PostgreSQL + SQLAlchemy"}
 
 @app.get("/contactos", response_model=List[ContactoRead])
 def listar_contactos(db: Session = Depends(get_db)):
+    """
+    Realiza un JOIN lógico para recuperar contactos e imágenes polimórficas.
+    """
     try:
         contactos = db.query(ContactoDB).all()
-        if not contactos:
-            return []
-        
         resultado = []
         for c in contactos:
-            # Buscar imagen en la tabla polimórfica
             img = db.query(ImagenDB).filter(
                 ImagenDB.entidad_id == c.id,
                 ImagenDB.entidad_tipo == "contacto"
@@ -106,23 +111,25 @@ def listar_contactos(db: Session = Depends(get_db)):
             ))
         return resultado
     except Exception as e:
-        print(f"ERROR EN LISTAR: {str(e)}")
-        return [] # Retornamos lista vacía para evitar error 500 en la app
+        print(f"ERROR LISTAR: {str(e)}")
+        return []
 
 @app.post("/contactos", response_model=ContactoRead)
 def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
+    """
+    Inserción Transaccional ATÓMICA (ACID).
+    Garantiza que el contacto y su imagen se guarden juntos o nada se guarde.
+    """
     try:
-        # 1. Crear Contacto
+        # Inicia transacción
         nuevo_contacto = ContactoDB(
             nombre=contacto.nombre,
             telefono=contacto.telefono,
             email=contacto.email
         )
         db.add(nuevo_contacto)
-        db.commit()
-        db.refresh(nuevo_contacto)
+        db.flush() # Genera el ID para la relación polimórfica
         
-        # 2. Crear Imagen Polimórfica (si existe URL)
         imagen_obj = None
         if contacto.imagen_url:
             nueva_img = ImagenDB(
@@ -131,8 +138,10 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
                 entidad_tipo="contacto"
             )
             db.add(nueva_img)
-            db.commit()
             imagen_obj = ImagenSchema(url=nueva_img.url)
+
+        db.commit() # Fin de la transacción
+        db.refresh(nuevo_contacto)
 
         return ContactoRead(
             id=str(nuevo_contacto.id),
@@ -146,5 +155,5 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
         )
     except Exception as e:
         db.rollback()
-        print(f"ERROR EN CREAR: {str(e)}")
+        print(f"ERROR CREAR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
