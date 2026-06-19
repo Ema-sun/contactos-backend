@@ -1,21 +1,27 @@
 from fastapi import FastAPI, HTTPException, Depends
-from sqlalchemy import create_engine, Column, String, Boolean, Text, ForeignKey, select
-from sqlalchemy.dialects.postgresql import UUID # IMPORTANTE: Usar UUID nativo
+from sqlalchemy import create_engine, Column, String, Boolean, Text, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from typing import List, Optional
 import uuid
+import os
 
-# Configuración de Base de Datos (Supabase)
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:FdXKl1vTLwTLk5Lz@db.oxbbcoyiskgtxliytgax.supabase.co:5432/postgres"
+# --- CONFIGURACIÓN DE CONEXIÓN ROBUSTA ---
+# Usamos el puerto 6543 y el modo transacción que es el estándar de Supabase para nubes como Render
+SQLALCHEMY_DATABASE_URL = "postgresql://postgres.oxbbcoyiskgtxliytgax:FdXKl1vTLwTLk5Lz@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require&prepare_threshold=0"
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+# El argumento 'pool_pre_ping' asegura que si la conexión se cae, se reconecte automáticamente
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, 
+    pool_pre_ping=True,
+    pool_recycle=300
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- Modelos de Base de Datos (SQLAlchemy) ---
-
+# --- MODELOS ---
 class ContactoDB(Base):
     __tablename__ = "contactos"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -33,8 +39,7 @@ class ImagenDB(Base):
     entidad_id = Column(UUID(as_uuid=True), nullable=False)
     entidad_tipo = Column(String, nullable=False)
 
-# --- Esquemas Pydantic para API ---
-
+# --- ESQUEMAS ---
 class ImagenSchema(BaseModel):
     url: str
 
@@ -48,7 +53,7 @@ class ContactoCreate(BaseModel):
     imagen_url: Optional[str] = None
 
 class ContactoRead(BaseModel):
-    id: str # El ID lo enviamos como string al móvil
+    id: str
     nombre: str
     telefono: str
     email: Optional[str]
@@ -56,11 +61,9 @@ class ContactoRead(BaseModel):
     is_favorite: bool
     notes: Optional[str]
     imagen: Optional[ImagenSchema] = None
-
     class Config:
-        from_attributes = True # Actualizado para Pydantic v2 (según tu log de Render)
+        from_attributes = True
 
-# --- Dependencia de Sesión ---
 def get_db():
     db = SessionLocal()
     try:
@@ -68,16 +71,15 @@ def get_db():
     finally:
         db.close()
 
-app = FastAPI(title="API de Contactos Profesional")
+app = FastAPI()
 
 @app.get("/")
-def read_root():
-    return {"status": "online", "message": "Backend de Contactos listo"}
+def health_check():
+    return {"status": "online", "database": "connected"}
 
 @app.post("/contactos", response_model=ContactoRead)
 def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
     try:
-        # 1. Crear el objeto Contacto con UUID real
         nuevo_contacto = ContactoDB(
             nombre=contacto.nombre,
             telefono=contacto.telefono,
@@ -87,9 +89,8 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
             notes=contacto.notes
         )
         db.add(nuevo_contacto)
-        db.flush() # Obtener el ID generado por la DB
+        db.flush()
         
-        # 2. Si hay imagen, crear el registro polimórfico
         imagen_obj = None
         if contacto.imagen_url:
             nueva_imagen = ImagenDB(
@@ -115,8 +116,7 @@ def crear_contacto(contacto: ContactoCreate, db: Session = Depends(get_db)):
         )
     except Exception as e:
         db.rollback()
-        print(f"CRITICAL ERROR: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error en base de datos: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/contactos", response_model=List[ContactoRead])
 def listar_contactos(db: Session = Depends(get_db)):
@@ -140,5 +140,4 @@ def listar_contactos(db: Session = Depends(get_db)):
             ))
         return resultado
     except Exception as e:
-        print(f"GET ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
